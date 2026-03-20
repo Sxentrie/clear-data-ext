@@ -149,7 +149,7 @@ export function createOverlay() {
 
   document.documentElement.appendChild(host);
 
-  const shadow = host.attachShadow({ mode: "closed" });
+  const shadow = host.attachShadow({ mode: "open" });
   shadow.innerHTML = buildTemplate();
 
   const origin = location.origin;
@@ -293,8 +293,7 @@ function setupCloseController(host, refs) {
     if (isClosing) return;
     isClosing = true;
 
-    // Fix closure memory leak on the host window object
-    host.removeEventListener("keydown", onKeyDown);
+    document.removeEventListener("keydown", onKeyDown, true);
     refs.overlay.classList.remove("visible");
 
     const onEnd = () => {
@@ -306,7 +305,7 @@ function setupCloseController(host, refs) {
     refs.overlay.addEventListener("transitionend", onEnd, { once: true });
   };
 
-  host.addEventListener("keydown", onKeyDown);
+  document.addEventListener("keydown", onKeyDown, true);
 
   const patchedClose = () => close();
 

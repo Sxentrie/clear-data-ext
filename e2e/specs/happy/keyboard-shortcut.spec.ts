@@ -23,8 +23,7 @@ test.describe("Keyboard Shortcut", () => {
        const tabs = await chrome.tabs.query({ url: url + "/*", active: true });
        // Dynamically trigger the background script's command logic directly
        // Mocks the underlying extension command handler
-       const nukeModule = await import("./nuke.js");
-       await nukeModule.nukeOriginAndReload(new URL(url).origin, tabs[0].id, "smart", false);
+       await (self as any).__e2e_nukeOriginAndReload(new URL(url).origin, tabs[0].id, "smart", false);
     }, server.url);
 
     // It should trigger navigation natively from the background reload

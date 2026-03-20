@@ -15,6 +15,12 @@ import { isValidWebOrigin } from "../shared/validation.js";
 import { getLastClickTime, setLastClickTime } from "./throttle.js";
 import { nukeOriginAndReload } from "./nuke.js";
 
+// Expose for E2E tests
+if (typeof self !== "undefined") {
+  self.__e2e_nukeOriginAndReload = nukeOriginAndReload;
+  self.__e2e_handleActionClick = handleActionClick;
+}
+
 // ─── Startup guard ────────────────────────────────────────────────────────────
 
 (function validateAPI() {
@@ -23,6 +29,9 @@ import { nukeOriginAndReload } from "./nuke.js";
       "[OriginNuke] FATAL: chrome.browsingData.remove is unavailable. " +
       "Ensure the 'browsingData' permission is declared and Chrome >= 74.",
     );
+  }
+  if (chrome.storage?.session?.setAccessLevel) {
+    chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }).catch(()=>{});
   }
 })();
 

@@ -16,7 +16,10 @@ export async function seedAllStorage(page: Page) {
     await new Promise<void>((resolve, reject) => {
       const req = indexedDB.open("nuke-test-idb", 1);
       req.onupgradeneeded = () => req.result.createObjectStore("store");
-      req.onsuccess = () => resolve();
+      req.onsuccess = () => {
+        req.result.close();
+        resolve();
+      };
       req.onerror = () => reject(req.error);
     });
   });

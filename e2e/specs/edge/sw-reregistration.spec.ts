@@ -17,7 +17,11 @@ test.describe("SW Re-registration Post-Nuke", () => {
   });
 
   test("background detects aggressive SW re-registration and shows amber badge/alert", async ({ page, context }) => {
-    // 1. Register persistent SW
+    // 1. Register persistent SW and ensure it survives reloads (simulating aggressive PWA)
+    await page.addInitScript(() => {
+      window.addEventListener('load', () => navigator.serviceWorker.register("/sw-persistent.js"));
+    });
+    // Wait for initial registration
     await registerServiceWorker(page, "/sw-persistent.js");
 
     const overlay = new OverlayPOM(page);

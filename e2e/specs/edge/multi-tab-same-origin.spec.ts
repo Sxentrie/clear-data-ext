@@ -55,12 +55,12 @@ test.describe("Multi-Tab Same Origin", () => {
     page2.on('framenavigated', () => { page2Reloaded = true; });
     page3.on('framenavigated', () => { page3Reloaded = true; });
 
-    // Fire nuke
+    // Fire nuke and wait for navigation concurrently to avoid race condition
     await overlay.clickAction();
-    await overlay.clickAction();
-
-    // Page 1 should definitely navigate
-    await page1.waitForNavigation();
+    await Promise.all([
+      page1.waitForNavigation({ timeout: 10000 }),
+      overlay.clickAction()
+    ]);
 
     // Verify all tabs had storage cleared via Hunter-Killer background task
     expect(await assertStorageEmpty(page1)).toBe(true);

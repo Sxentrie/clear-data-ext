@@ -11,7 +11,7 @@ export function startTestServer(): Promise<{ url: string; close: () => void }> {
     
     // Test endpoint that sends strict CSP headers
     app.get("/csp-strict", (req, res) => {
-      res.setHeader("Content-Security-Policy", "default-src 'self'");
+      res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'");
       res.sendFile(path.resolve(__dirname, "../public/index.html"));
     });
     

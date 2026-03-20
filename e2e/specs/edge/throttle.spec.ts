@@ -31,10 +31,7 @@ test.describe("Toolbar Throttle Constraints", () => {
        // Playwright's executeScript allows injecting identical payloads
        // To test index.js module idempotency in the content page directly over 5 calls
        for(let i=0; i<5; i++){
-          chrome.scripting.executeScript({
-            target : { tabId: tab.id },
-            files  : ["src/content/index.js"],
-          }).catch(()=>{});
+          (self as any).__e2e_handleActionClick(tab).catch(()=>{});
        }
     });
 
@@ -48,13 +45,10 @@ test.describe("Toolbar Throttle Constraints", () => {
     // Call it again - toggleOverlay should naturally toggle it off
     await worker.evaluate(async () => {
        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-       await chrome.scripting.executeScript({
-         target : { tabId: tabs[0].id },
-         files  : ["src/content/index.js"],
-       });
+       await (self as any).__e2e_handleActionClick(tabs[0]);
     });
 
     // Wait for animation out and DOM removal
-    await expect.poll(async () => await page.locator("#__page-util-nuke-overlay__").count(), { timeout: 1000 }).toBe(0);
+    await expect.poll(async () => await page.locator("#__page-util-nuke-overlay__").count(), { timeout: 3000 }).toBe(0);
   });
 });

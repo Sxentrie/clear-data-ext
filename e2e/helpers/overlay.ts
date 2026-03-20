@@ -8,11 +8,11 @@ export class OverlayPOM {
   }
 
   async isVisible(): Promise<boolean> {
-    return this.host.isVisible();
+    return this.host.locator(".panel").isVisible();
   }
 
   async waitForOverlay(timeout = 3000) {
-    await this.host.waitFor({ state: "visible", timeout });
+    await this.host.locator(".panel").waitFor({ state: "visible", timeout });
   }
 
   async clickSmart()  { await this.host.locator("#btn-smart").click(); }

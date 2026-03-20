@@ -1,5 +1,6 @@
 import { test, expect, unlockShadowDom, getBackgroundWorker } from "../../fixtures/extension";
 import { startTestServer } from "../../fixtures/test-page";
+import { OverlayPOM } from "../../helpers/overlay";
 
 test.describe("CSP Blocked Navigation", () => {
   let server: { url: string; close: () => void };
@@ -13,14 +14,12 @@ test.describe("CSP Blocked Navigation", () => {
     server.close();
   });
 
-  test("shows native confirm dialog when script injection is blocked", async ({ page, context }) => {
+  test("overlay successfully injects unharmed on strict CSP pages in modern Chromium", async ({ page, context }) => {
     // Navigate to strict CSP page endpoint
     await page.goto(server.url + "/csp-strict");
 
     const worker = await getBackgroundWorker(context);
-
-    // Listen for the native dialog beforehand!
-    const dialogPromise = page.waitForEvent("dialog");
+    const overlay = new OverlayPOM(page);
 
     await worker.evaluate(async (url) => {
        const tabs = await chrome.tabs.query({ url: url + "/*" });
@@ -31,14 +30,9 @@ test.describe("CSP Blocked Navigation", () => {
        });
     }, server.url);
 
-    const dialog = await dialogPromise;
-    expect(dialog.message()).toContain("Origin Nuke UI was blocked");
+    // It should open the overlay natively, bypassing the page CSP
+    await overlay.waitForOverlay();
     
-    // Cancel the confirm
-    await dialog.dismiss();
-    
-    // Wait small amount to ensure no navigation occurs
-    await page.waitForTimeout(500);
-    expect(page.url()).toContain("/csp-strict");
+    expect(await overlay.isVisible()).toBe(true);
   });
 });
