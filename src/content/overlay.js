@@ -32,8 +32,9 @@ const SW_REREG_KEY_PREFIX = "sw_rereg_";
 // ── Snapshot helpers ───────────────────────────────────────────────────────
 
 function snapshotKey(origin) {
-  // btoa is safe because origin is strictly validated as http/https beforehand
-  return AUDIT_SNAPSHOT_KEY_PREFIX + btoa(origin).replace(/[=+/]/g, "");
+  // UTF-8 safe btoa encoding
+  const utf8 = encodeURIComponent(origin).replace(/%([0-9A-F]{2})/g, (match, p1) => String.fromCharCode(parseInt(p1, 16)));
+  return AUDIT_SNAPSHOT_KEY_PREFIX + btoa(utf8).replace(/[=+/]/g, "");
 }
 
 async function saveAuditSnapshot(origin, audit) {
@@ -127,7 +128,8 @@ function setConsoleLines(el, lines) {
   el.replaceChildren();
   for (const line of lines) {
     const div = document.createElement("div");
-    div.textContent = line;
+    // Prevent malicious lengths blowing out the shadow DOM height bounds
+    div.textContent = line.length > 200 ? line.slice(0, 197) + "..." : line;
     el.appendChild(div);
   }
 }
@@ -175,16 +177,45 @@ export function createOverlay() {
   refs.originText.className = isValid ? "origin" : "origin invalid";
   refs.actionBtn.disabled = !isValid;
 
-  // State flag for the one-shot storage audit
-  const auditState = { applied: false };
+  if (isValid) {
+    const crossOriginFrames = Array.from(document.querySelectorAll("iframe")).filter((f) => {
+      try { return new URL(f.src).origin !== origin; } catch { return false; }
+    });
+    if (crossOriginFrames.length > 0) {
+      const warnBadge = document.createElement("div");
+      warnBadge.className = "warning";
+      warnBadge.style.marginTop = "6px";
+      warnBadge.textContent = `\u26A0 ${crossOriginFrames.length} Cross-Origin Frame${crossOriginFrames.length > 1 ? "s" : ""} Excluded`;
+      refs.originText.after(warnBadge);
+    }
+  }
 
-  // Initialize UI controllers
+  // Setup core logic and close routing
+  const auditState = { applied: false };
   const stateCtrl = setupStateController(refs, origin, auditState);
   setupPresetController(refs, cookieDomain, stateCtrl, auditState);
   setupCloseController(host, refs);
 
-  // Kick off storage audit asynchronously
-  auditOriginStorage(origin).then(async (audit) => {
+  // Decoupled async data loader
+  initializeOverlayData(origin, refs, swAlertEl, unregisterBtn, auditState);
+
+  if (typeof host.showPopover === "function") {
+    try { host.showPopover(); } catch {}
+  }
+  requestAnimationFrame(() => {
+    refs.overlay.classList.add("visible");
+    refs.actionBtn.focus();
+  });
+  
+  return host;
+}
+
+/**
+ * Handles all async layout and telemetry updates out of the rendering thread.
+ */
+async function initializeOverlayData(origin, refs, swAlertEl, unregisterBtn, auditState) {
+  try {
+    const audit = await auditOriginStorage(origin);
     auditState.lastResult = audit;
 
     const snapshot = await loadAuditSnapshot(origin);
@@ -203,7 +234,6 @@ export function createOverlay() {
       auditState.applied = true;
     }
 
-    // After audit layout updates, independently hook the SW alert if present.
     const flag = await loadSwReregFlag(origin);
     if (!flag) return;
     swAlertEl.classList.remove("hidden");
@@ -241,17 +271,9 @@ export function createOverlay() {
       }
     });
 
-  }).catch(() => {
-    // Non-fatal, static label remains
-  });
-
-  // Entrance transition
-  if (typeof host.showPopover === "function") {
-    try { host.showPopover(); } catch {}
+  } catch {
+    // Non-fatal, static layer remains visible.
   }
-  requestAnimationFrame(() => refs.overlay.classList.add("visible"));
-  
-  return host;
 }
 
 /**
@@ -261,10 +283,18 @@ function setupCloseController(host, refs) {
   let isClosing = false;
   let closeTimer = null;
 
+  const onKeyDown = (e) => {
+    if (e.key === "Escape") {
+      close();
+    }
+  };
+
   const close = () => {
     if (isClosing) return;
     isClosing = true;
 
+    // Fix closure memory leak on the host window object
+    host.removeEventListener("keydown", onKeyDown);
     refs.overlay.classList.remove("visible");
 
     const onEnd = () => {
@@ -272,25 +302,13 @@ function setupCloseController(host, refs) {
       host.remove();
     };
 
-    // Race conditional fallback if transitionend drops
     closeTimer = setTimeout(onEnd, CLOSE_TIMEOUT_MS);
     refs.overlay.addEventListener("transitionend", onEnd, { once: true });
   };
 
-  const onKeyDown = (e) => {
-    if (e.key === "Escape") {
-      document.removeEventListener("keydown", onKeyDown);
-      close();
-    }
-  };
+  host.addEventListener("keydown", onKeyDown);
 
-  // Close intercepts
-  document.addEventListener("keydown", onKeyDown);
-
-  const patchedClose = () => {
-    document.removeEventListener("keydown", onKeyDown);
-    close();
-  };
+  const patchedClose = () => close();
 
   host.addEventListener("page-util:close", patchedClose);
   refs.closeBtn.addEventListener("click", patchedClose);
@@ -387,7 +405,23 @@ function setupStateController(refs, origin, auditState) {
 
         if (response?.success) {
           showStatus("success", "Done \u2014 origin data cleared. Reloading\u2026");
-          setTimeout(() => refs.closeBtn.click(), SUCCESS_CLOSE_DELAY_MS);
+          
+          const receiptLines = Object.entries(response.metrics || {})
+            .map(([typ, ms]) => `> [${typ}] ${ms}ms`);
+            
+          if (response.killedSwCount) {
+             receiptLines.unshift(`\u26A0 Killed SW Locks: ${response.killedSwCount}`);
+          }
+          
+          if (receiptLines.length > 0) {
+             setConsoleLines(refs.dataTypes, receiptLines);
+             refs.dataTypes.className = "data-types clean";
+          }
+          
+          setTimeout(() => {
+            refs.closeBtn.click();
+            window.location.reload();
+          }, 1500);
         } else {
           // Safeguard: Do not leak raw err.message from IPC unhandled rejections directly into UI.
           showStatus("error", "Error \u2014 " + friendlyErrorMessage(response?.code, "Action failed."));
@@ -473,6 +507,19 @@ hr { border: none; border-top: 1px solid #e4e4e7; margin: 0; }
   width: 100%; height: 38px; border-radius: 8px; font-size: 13px; font-weight: 600;
   cursor: pointer; border: 1px solid transparent; transition: all 150ms ease;
   box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+  position: relative; overflow: hidden;
+}
+.action-btn:focus-visible { outline: 2px solid #a855f7; outline-offset: 2px; }
+.action-btn::after {
+  content: ""; position: absolute; inset: 0; background: rgba(0,0,0,0.15);
+  transform-origin: left; transform: scaleX(0); pointer-events: none;
+}
+.action-btn.armed::after {
+  animation: armed-countdown 3s linear forwards;
+}
+@keyframes armed-countdown {
+  0% { transform: scaleX(1); }
+  100% { transform: scaleX(0); }
 }
 .action-btn.idle { background: #18181b; color: #fafafa; }
 .action-btn.idle:hover:not(:disabled) { background: #27272a; }

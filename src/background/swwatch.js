@@ -16,6 +16,9 @@ import { setBadge } from "./badge.js";
 
 const SW_REREG_KEY_PREFIX = "sw_rereg_";
 
+/** @type {Set<string>} */
+const activeLocks = new Set();
+
 /**
  * After a nuke that cleared service workers, watches for the tab to finish
  * loading, then checks whether a SW re-registered for the same origin.
@@ -50,17 +53,21 @@ export function watchForSwReregistration(tabId, origin) {
           args: [origin],
         });
         swCount = result?.result ?? 0;
-      } catch {
-        // Tab navigated away, closed, or scripting blocked — ignore.
+      } catch (err) {
+        // Tab navigated away, closed, or scripting blocked.
+        console.debug("[OriginNuke] SW watch check aborted/blocked:", err.message);
         return;
       }
 
       if (swCount > 0) {
         const flagKey = SW_REREG_KEY_PREFIX + encodeURIComponent(origin);
         
-        // Read-modify-write: append this detection timestamp to the events array.
-        let events = [];
+        if (activeLocks.has(flagKey)) return;
+        activeLocks.add(flagKey);
+
         try {
+          // Read-modify-write: append this detection timestamp to the events array.
+          let events = [];
           const existing = await chrome.storage.session.get(flagKey);
           const stored = existing[flagKey];
           const cutoff = Date.now() - SW_REREG_EXPIRY_MS;
@@ -70,16 +77,18 @@ export function watchForSwReregistration(tabId, origin) {
           } else if (typeof stored?.ts === "number" && stored.ts > cutoff) {
             events = [stored.ts]; // Migrate legacy storage structs dynamically
           }
-        } catch { /* Non-fatal */ }
 
-        events.push(Date.now());
-        chrome.storage.session
-          .set({ [flagKey]: { origin, events } })
-          .catch(() => {});
+          events.push(Date.now());
+          await chrome.storage.session.set({ [flagKey]: { origin, events } });
 
-        await setBadge(tabId, BADGE_SW_REREGISTERED_TEXT, BADGE_SW_REREGISTERED_COLOR);
-        // Auto-clear after display window; pass no text to reset.
-        setTimeout(() => setBadge(tabId), SW_BADGE_CLEAR_MS);
+          await setBadge(tabId, BADGE_SW_REREGISTERED_TEXT, BADGE_SW_REREGISTERED_COLOR);
+          // Auto-clear after display window; pass no text to reset.
+          setTimeout(() => setBadge(tabId), SW_BADGE_CLEAR_MS);
+        } catch (e) {
+          console.error("[OriginNuke] SW tracking storage error:", e);
+        } finally {
+          activeLocks.delete(flagKey);
+        }
       }
     }, SW_CHECK_DELAY_MS);
   }

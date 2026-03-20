@@ -6,11 +6,7 @@
 
 import { VALID_SCHEMES, MAX_ORIGIN_LENGTH } from "../shared/constants.js";
 
-export const MAX_NAME_LEN = 28;
 
-export function truncateName(n) {
-  return n.length > MAX_NAME_LEN ? n.slice(0, MAX_NAME_LEN) + "\u2026" : n;
-}
 
 /**
  * Strict parity validation for exactly targeted origins.
@@ -52,10 +48,7 @@ export function estimateCookieDomain(origin) {
 
   let result;
   try {
-    const { hostname } = new URL(origin);
-    const labels = hostname.split(".");
-    const registrable = labels.length > 2 ? labels.slice(-2).join(".") : hostname;
-    result = `.${registrable}`;
+    result = new URL(origin).hostname;
   } catch {
     result = origin;
   }

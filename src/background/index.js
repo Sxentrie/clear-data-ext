@@ -68,6 +68,34 @@ async function handleActionClick(tab) {
 
 chrome.action.onClicked.addListener(handleActionClick);
 
+// ─── Keyboard Commands ────────────────────────────────────────────────────────
+
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== "nuke-smart-instant") return;
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || !tab.url) return;
+
+    let scheme;
+    try {
+      ({ protocol: scheme } = new URL(tab.url));
+    } catch {
+      return;
+    }
+
+    if (!VALID_SCHEMES.includes(scheme)) {
+      console.warn("[OriginNuke] Unsupported tab scheme for command:", scheme);
+      return;
+    }
+
+    const claimedOrigin = new URL(tab.url).origin;
+    await nukeOriginAndReload(claimedOrigin, tab.id, PRESET_SMART, false);
+  } catch (err) {
+    console.error("[OriginNuke] Headless command failed:", err);
+  }
+});
+
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -154,19 +182,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   (async () => {
-    let timerId;
     try {
-      const timeout = new Promise((_, reject) => {
-        timerId = setTimeout(() => reject(Object.assign(new Error("Nuke operation timed out."), { code: "TIMEOUT" })), 10000);
-      });
-      const { cookieDomain } = await Promise.race([
-        nukeOriginAndReload(claimedOrigin, tabId, preset),
-        timeout
-      ]);
-      clearTimeout(timerId);
-      sendResponse({ success: true, cookieDomain });
+      const { cookieDomain, metrics, killedSwCount } = await nukeOriginAndReload(claimedOrigin, tabId, preset);
+      sendResponse({ success: true, cookieDomain, metrics, killedSwCount });
     } catch (err) {
-      clearTimeout(timerId);
       console.error("[OriginNuke] Nuke failed:", err);
       sendResponse({
         success : false,

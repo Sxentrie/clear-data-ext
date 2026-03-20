@@ -5,7 +5,7 @@
  * Exports toggleOverlay to handle idempotency using module-level state.
  */
 
-import { CONTAINER_ID } from "../shared/constants.js";
+
 import { createOverlay } from "./overlay.js";
 
 /** @type {HTMLElement | null} */

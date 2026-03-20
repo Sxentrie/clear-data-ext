@@ -15,10 +15,20 @@
 
 (async () => {
   try {
-    // Dynamic import without cache buster allows V8 to safely cache the module.
-    // The idempotency logic is handled entirely inside toggleOverlay().
-    const mod = await import(chrome.runtime.getURL("src/content/main.js"));
-    mod.toggleOverlay();
+    // Dynamic import fails on strict CSP (e.g., GitHub, Banks).
+    // The Chromium implementation for MV3 scripting often blocks standard dynamic extension imports.
+    const url = chrome.runtime.getURL("src/content/main.js");
+    try {
+      const mod = await import(url);
+      mod.toggleOverlay();
+    } catch {
+      // Fallback: The page has a strict CSP blocking dynamic ES module imports.
+      // We cannot use Blob URLs here as relative imports within the module map will fail.
+      console.warn("[OriginNuke] CSP blocked module import. UI cannot be rendered.");
+      if (window.confirm("Origin Nuke UI was blocked by this page's strict Security Policy.\n\nWould you like to instantly Smart-Clear this origin instead (preserves cookies)?")) {
+        chrome.runtime.sendMessage({ action: "nuke", origin: location.origin, preset: "smart" });
+      }
+    }
   } catch (err) {
     console.error("[OriginNuke] Failed to load content modules:", err);
   }
