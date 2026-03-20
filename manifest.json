@@ -23,10 +23,10 @@
     "storage",
     "tabs"
   ],
-  "host_permissions": [],
-  "optional_host_permissions": [
+  "host_permissions": [
     "<all_urls>"
   ],
+  "optional_host_permissions": [],
 
   "action": {
     "default_icon": {
