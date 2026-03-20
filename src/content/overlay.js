@@ -16,12 +16,79 @@ import {
   WARNING_FULL_SUFFIX,
   DATA_LABELS_SMART,
   DATA_LABELS_FULL,
+  AUDIT_SNAPSHOT_KEY_PREFIX,
+  AUDIT_SNAPSHOT_EXPIRY_MS,
 } from "../shared/constants.js";
 import { estimateCookieDomain } from "../shared/validation.js";
 import { friendlyErrorMessage } from "./errors.js";
 import { auditOriginStorage, formatAuditSummary } from "./audit.js";
 
 const STATES = Object.freeze({ IDLE: "idle", ARMED: "armed", FIRING: "firing" });
+
+const SW_REREG_KEY_PREFIX = "sw_rereg_";
+const SW_REREG_EXPIRY_MS  = 10 * 60 * 1000;
+
+// ── Snapshot helpers ───────────────────────────────────────────────────────
+
+function snapshotKey(origin) {
+  // btoa is safe because origin is strictly validated as http/https beforehand
+  return AUDIT_SNAPSHOT_KEY_PREFIX + btoa(origin).replace(/[=+/]/g, "");
+}
+
+async function saveAuditSnapshot(origin, audit) {
+  try {
+    await chrome.storage.session.set({
+      [snapshotKey(origin)]: { audit, ts: Date.now() },
+    });
+  } catch { /* Non-fatal — session storage quota exceeded on some profiles */ }
+}
+
+async function loadAuditSnapshot(origin) {
+  try {
+    const result = await chrome.storage.session.get(snapshotKey(origin));
+    const entry = result[snapshotKey(origin)];
+    if (!entry) return null;
+    if (Date.now() - entry.ts > AUDIT_SNAPSHOT_EXPIRY_MS) {
+      chrome.storage.session.remove(snapshotKey(origin));
+      return null;
+    }
+    return entry;
+  } catch { return null; }
+}
+
+async function loadSwReregFlag(origin) {
+  const key = SW_REREG_KEY_PREFIX + encodeURIComponent(origin);
+  try {
+    const result = await chrome.storage.session.get(key);
+    const flag = result[key];
+    if (!flag) return null;
+    if (Date.now() - flag.ts > SW_REREG_EXPIRY_MS) {
+      chrome.storage.session.remove(key).catch(() => {});
+      return null;
+    }
+    return { key };
+  } catch { return null; }
+}
+
+// ── Regrowth message builder ───────────────────────────────────────────────
+
+function buildRegrowthLine(snapshot, live) {
+  const age = Math.round((Date.now() - snapshot.ts) / 1000);
+  const parts = [];
+
+  if (live.bytes > 0) {
+    const mb = live.bytes / 1_048_576;
+    parts.push(mb >= 0.1 ? `~${mb.toFixed(1)}\u202FMB` : `~${(live.bytes / 1024).toFixed(0)}\u202FKB`);
+  }
+  if (live.caches > 0)       parts.push(`${live.caches} cache${live.caches !== 1 ? "s" : ""}`);
+  if (live.idbDatabases > 0) parts.push(`${live.idbDatabases} IDB`);
+  if (live.serviceWorkers > 0) parts.push(`${live.serviceWorkers}\u202FSW`);
+
+  if (parts.length === 0) {
+    return { text: `\u2713\u202FClean since nuke ${age}s ago`, type: "clean" };
+  }
+  return { text: `\u26A0\u202F${parts.join(" \u00B7 ")} regrew since nuke ${age}s ago`, type: "regrowth" };
+}
 
 /**
  * Main entry point. Wires the functional controllers.
@@ -32,6 +99,10 @@ export function createOverlay() {
   host.id = CONTAINER_ID;
   host.style.cssText =
     "all:initial; position:fixed; top:0; right:0; z-index:2147483647; pointer-events:none;";
+    
+  // Opt into the native Top Layer to hover above site <dialog>s and max z-indexes
+  if ("popover" in host) host.popover = "manual";
+
   document.documentElement.appendChild(host);
 
   const shadow = host.attachShadow({ mode: "closed" });
@@ -54,6 +125,9 @@ export function createOverlay() {
     originText: shadow.getElementById("origin-text"),
   };
 
+  const swAlertEl     = shadow.getElementById("sw-alert");
+  const unregisterBtn = shadow.getElementById("unregister-btn");
+
   // Safe DOM injection (prevents XSS from opaque/malformed origins)
   refs.originText.textContent = isValid ? origin : "Not a web page";
   refs.originText.className = isValid ? "origin" : "origin invalid";
@@ -63,23 +137,60 @@ export function createOverlay() {
   const auditState = { applied: false };
 
   // Initialize UI controllers
-  const stateCtrl = setupStateController(refs, origin);
+  const stateCtrl = setupStateController(refs, origin, auditState);
   setupPresetController(refs, cookieDomain, stateCtrl, auditState);
   setupCloseController(host, refs);
 
   // Kick off storage audit asynchronously
-  auditOriginStorage(origin).then((audit) => {
-    // Only apply if the user hasn't already toggled presets before we resolved
-    if (!auditState.applied && refs.btnSmart.classList.contains("active")) {
+  auditOriginStorage(origin).then(async (audit) => {
+    auditState.lastResult = audit;
+
+    const snapshot = await loadAuditSnapshot(origin);
+    if (snapshot) {
+      const { text, type } = buildRegrowthLine(snapshot, audit);
+      refs.dataTypes.textContent = text;
+      refs.dataTypes.className = type === "regrowth" ? "data-types regrowth" : "data-types clean";
+      auditState.applied = true;
+    } else if (!auditState.applied && refs.btnSmart.classList.contains("active")) {
       const summary = formatAuditSummary(audit);
       refs.dataTypes.textContent = summary || "No stored data detected";
       auditState.applied = true;
     }
+
+    // After audit layout updates, independently hook the SW alert if present.
+    const flag = await loadSwReregFlag(origin);
+    if (!flag) return;
+    swAlertEl.classList.remove("hidden");
+
+    unregisterBtn.addEventListener("click", async () => {
+      unregisterBtn.disabled = true;
+      unregisterBtn.textContent = "Unregistering\u2026";
+
+      try {
+        const resp = await chrome.runtime.sendMessage({ action: "unregister_sw", origin });
+        if (resp?.success) {
+          const n = resp.count;
+          unregisterBtn.textContent = `Unregistered ${n} SW`;
+          chrome.storage.session.remove(flag.key).catch(() => {});
+          setTimeout(() => swAlertEl.classList.add("hidden"), 1500);
+        } else {
+          unregisterBtn.textContent = "Failed \u2014 try full nuke";
+          unregisterBtn.disabled = false;
+        }
+      } catch {
+        unregisterBtn.textContent = "Error \u2014 backend unavailable";
+        unregisterBtn.disabled = false;
+      }
+    });
+
   }).catch(() => {
     // Non-fatal, static label remains
   });
 
   // Entrance transition
+  if (typeof host.showPopover === "function") {
+    try { host.showPopover(); } catch {}
+  }
   requestAnimationFrame(() => refs.overlay.classList.add("visible"));
   
   return host;
@@ -134,6 +245,7 @@ function setupPresetController(refs, cookieDomain, stateCtrl, auditState) {
   const setPreset = (next) => {
     if (auditState.applied) {
       auditState.applied = false;
+      refs.dataTypes.className = "data-types";
     }
     const isFull = next === PRESET_FULL;
 
@@ -166,7 +278,7 @@ function setupPresetController(refs, cookieDomain, stateCtrl, auditState) {
 /**
  * Manages the core action button state machine and IPC dispatch.
  */
-function setupStateController(refs, origin) {
+function setupStateController(refs, origin, auditState) {
   let currentState = STATES.IDLE;
   let armTimer = null;
 
@@ -209,8 +321,10 @@ function setupStateController(refs, origin) {
       refs.statusEl.className = "status";
 
       const preset = refs.btnSmart.classList.contains("active") ? PRESET_SMART : PRESET_FULL;
+      const auditToSave = auditState.lastResult ?? { caches: 0, idbDatabases: 0, serviceWorkers: 0, bytes: 0 };
 
       try {
+        await saveAuditSnapshot(origin, auditToSave);
         const response = await chrome.runtime.sendMessage({ action: "nuke", origin, preset });
 
         if (response?.success) {
@@ -347,12 +461,41 @@ hr {
   color: #71717a;
   line-height: 1.4;
 }
+.data-types.regrowth { color: #dc2626; }
+.data-types.clean    { color: #16a34a; }
 .warning {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   font-size: 10px;
   color: #dc2626;
   line-height: 1.4;
 }
+.sw-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sw-alert.hidden { display: none; }
+.sw-alert-text {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 10px;
+  color: #b45309;
+  line-height: 1.4;
+}
+.unregister-btn {
+  width: 100%;
+  height: 30px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  cursor: pointer;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  transition: opacity 100ms ease;
+}
+.unregister-btn:hover:not(:disabled) { opacity: 0.85; }
+.unregister-btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .hidden {
   display: none;
 }
@@ -446,9 +589,13 @@ hr {
   .data-types {
     color: #a1a1aa;
   }
+  .data-types.regrowth { color: #f87171; }
+  .data-types.clean    { color: #4ade80; }
   .warning {
     color: #f87171;
   }
+  .sw-alert-text  { color: #fbbf24; }
+  .unregister-btn { background: #292524; border-color: #78350f; color: #fcd34d; }
   .action-btn.idle {
     background: #e4e4e7;
     color: #171717;
@@ -484,6 +631,10 @@ hr {
     </div>
     <span class="data-types" id="data-types"></span>
     <span class="warning hidden" id="warning"></span>
+    <div class="sw-alert hidden" id="sw-alert">
+      <span class="sw-alert-text">\u26A0 SW re-registered after last nuke</span>
+      <button class="unregister-btn" id="unregister-btn">Unregister SW only</button>
+    </div>
     <hr/>
     <button class="action-btn idle" id="action-btn">Clear Origin Data</button>
     <span class="status" id="status"></span>

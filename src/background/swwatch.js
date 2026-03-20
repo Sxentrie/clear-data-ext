@@ -13,6 +13,8 @@ import {
 } from "../shared/constants.js";
 import { setBadge } from "./badge.js";
 
+const SW_REREG_KEY_PREFIX = "sw_rereg_";
+
 /**
  * After a nuke that cleared service workers, watches for the tab to finish
  * loading, then checks whether a SW re-registered for the same origin.
@@ -53,6 +55,10 @@ export function watchForSwReregistration(tabId, origin) {
       }
 
       if (swCount > 0) {
+        const flagKey = SW_REREG_KEY_PREFIX + encodeURIComponent(origin);
+        // Persist flag — non-fatal if it fails
+        chrome.storage.session.set({ [flagKey]: { origin, ts: Date.now() } }).catch(() => {});
+
         await setBadge(tabId, BADGE_SW_REREGISTERED_TEXT, BADGE_SW_REREGISTERED_COLOR);
         // Auto-clear after display window; pass no text to reset.
         setTimeout(() => setBadge(tabId), SW_BADGE_CLEAR_MS);

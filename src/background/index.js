@@ -71,6 +71,56 @@ chrome.action.onClicked.addListener(handleActionClick);
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.action === "unregister_sw") {
+    const tabId  = sender?.tab?.id;
+    const tabUrl = sender?.tab?.url;
+
+    if (typeof tabId !== "number" || tabId < 0) {
+      sendResponse({ success: false, error: "Cannot identify sender tab.", code: "NO_TAB" });
+      return false;
+    }
+
+    const { origin: claimedOrigin } = message;
+    if (!claimedOrigin || !isValidWebOrigin(claimedOrigin)) {
+      sendResponse({ success: false, error: "Invalid or non-web origin.", code: "BAD_ORIGIN" });
+      return false;
+    }
+
+    let tabOrigin;
+    try { tabOrigin = new URL(tabUrl).origin; }
+    catch {
+      sendResponse({ success: false, error: "Cannot parse sender tab URL.", code: "BAD_TAB_URL" });
+      return false;
+    }
+
+    if (claimedOrigin !== tabOrigin) {
+      sendResponse({ success: false, error: "Origin mismatch.", code: "ORIGIN_MISMATCH" });
+      return false;
+    }
+
+    (async () => {
+      try {
+        const [result] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: async (nukedOrigin) => {
+            if (typeof navigator?.serviceWorker === "undefined") return 0;
+            const regs = await navigator.serviceWorker.getRegistrations();
+            const targets = regs.filter((r) => r.scope.startsWith(nukedOrigin));
+            // unregister() resolves to boolean; we want count regardless of result
+            await Promise.allSettled(targets.map((r) => r.unregister()));
+            return targets.length;
+          },
+          args: [claimedOrigin],
+        });
+        sendResponse({ success: true, count: result?.result ?? 0 });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message, code: "SCRIPT_ERROR" });
+      }
+    })();
+
+    return true; // keep message channel open for async response
+  }
+
   if (message?.action !== "nuke") return false;
 
   const tabId  = sender?.tab?.id;
