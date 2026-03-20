@@ -82,6 +82,9 @@ export const SW_BADGE_CLEAR_MS = 6_000;
 export const AUDIT_SNAPSHOT_KEY_PREFIX = "nuke_snap_";
 export const AUDIT_SNAPSHOT_EXPIRY_MS  = 5 * 60 * 1000;
 
+export const SW_REREG_ESCALATE_AT = 3;
+export const SW_REREG_EXPIRY_MS   = 10 * 60 * 1000;
+
 // ─── Badge feedback ───────────────────────────────────────────────────────────
 
 export const BADGE_ACTIVE_TEXT   = "...";

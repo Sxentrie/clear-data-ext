@@ -18,6 +18,8 @@ import {
   DATA_LABELS_FULL,
   AUDIT_SNAPSHOT_KEY_PREFIX,
   AUDIT_SNAPSHOT_EXPIRY_MS,
+  SW_REREG_ESCALATE_AT,
+  SW_REREG_EXPIRY_MS,
 } from "../shared/constants.js";
 import { estimateCookieDomain } from "../shared/validation.js";
 import { friendlyErrorMessage } from "./errors.js";
@@ -26,7 +28,6 @@ import { auditOriginStorage, formatAuditSummary } from "./audit.js";
 const STATES = Object.freeze({ IDLE: "idle", ARMED: "armed", FIRING: "firing" });
 
 const SW_REREG_KEY_PREFIX = "sw_rereg_";
-const SW_REREG_EXPIRY_MS  = 10 * 60 * 1000;
 
 // ── Snapshot helpers ───────────────────────────────────────────────────────
 
@@ -62,11 +63,31 @@ async function loadSwReregFlag(origin) {
     const result = await chrome.storage.session.get(key);
     const flag = result[key];
     if (!flag) return null;
-    if (Date.now() - flag.ts > SW_REREG_EXPIRY_MS) {
+
+    const now     = Date.now();
+    const cutoff  = now - SW_REREG_EXPIRY_MS;
+
+    let recentEvents;
+    if (Array.isArray(flag.events)) {
+      recentEvents = flag.events.filter((ts) => ts > cutoff);
+    } else if (typeof flag.ts === "number" && flag.ts > cutoff) {
+      recentEvents = [flag.ts];
+    } else {
+      recentEvents = [];
+    }
+
+    if (recentEvents.length === 0) {
       chrome.storage.session.remove(key).catch(() => {});
       return null;
     }
-    return { key };
+
+    if (recentEvents.length !== flag.events?.length) {
+      chrome.storage.session
+        .set({ [key]: { origin, events: recentEvents } })
+        .catch(() => {});
+    }
+
+    return { key, count: recentEvents.length };
   } catch { return null; }
 }
 
@@ -74,20 +95,41 @@ async function loadSwReregFlag(origin) {
 
 function buildRegrowthLine(snapshot, live) {
   const age = Math.round((Date.now() - snapshot.ts) / 1000);
-  const parts = [];
+  const lines = [];
+
+  const liveNames  = live.cacheNames ?? [];
+  const liveIdb    = live.idbNames   ?? [];
+
+  const hasNameData = liveNames.length > 0 || liveIdb.length > 0
+    || live.serviceWorkers > 0 || live.bytes > 0;
+
+  if (!hasNameData) {
+    return { lines: [`\u2713 Clean since nuke ${age}s ago`], type: "clean" };
+  }
+
+  lines.push(`\u26A0 Regrew ${age}s ago:`);
 
   if (live.bytes > 0) {
     const mb = live.bytes / 1_048_576;
-    parts.push(mb >= 0.1 ? `~${mb.toFixed(1)}\u202FMB` : `~${(live.bytes / 1024).toFixed(0)}\u202FKB`);
+    lines.push(mb >= 0.1 ? `> ~${mb.toFixed(1)} MB` : `> ~${(live.bytes / 1024).toFixed(0)} KB`);
   }
-  if (live.caches > 0)       parts.push(`${live.caches} cache${live.caches !== 1 ? "s" : ""}`);
-  if (live.idbDatabases > 0) parts.push(`${live.idbDatabases} IDB`);
-  if (live.serviceWorkers > 0) parts.push(`${live.serviceWorkers}\u202FSW`);
 
-  if (parts.length === 0) {
-    return { text: `\u2713\u202FClean since nuke ${age}s ago`, type: "clean" };
+  for (const n of liveNames) lines.push(`> [Cache] ${n}`);
+  for (const n of liveIdb) lines.push(`> [IDB] ${n}`);
+
+  if (live.serviceWorkers > 0) lines.push(`> ${live.serviceWorkers} SW`);
+
+  return { lines, type: "regrowth" };
+}
+
+// Safely appends multi-line text arrays into the DOM without XSS vulnerability vectors
+function setConsoleLines(el, lines) {
+  el.replaceChildren();
+  for (const line of lines) {
+    const div = document.createElement("div");
+    div.textContent = line;
+    el.appendChild(div);
   }
-  return { text: `\u26A0\u202F${parts.join(" \u00B7 ")} regrew since nuke ${age}s ago`, type: "regrowth" };
 }
 
 /**
@@ -147,13 +189,17 @@ export function createOverlay() {
 
     const snapshot = await loadAuditSnapshot(origin);
     if (snapshot) {
-      const { text, type } = buildRegrowthLine(snapshot, audit);
-      refs.dataTypes.textContent = text;
+      const { lines, type } = buildRegrowthLine(snapshot, audit);
+      setConsoleLines(refs.dataTypes, lines);
       refs.dataTypes.className = type === "regrowth" ? "data-types regrowth" : "data-types clean";
       auditState.applied = true;
     } else if (!auditState.applied && refs.btnSmart.classList.contains("active")) {
-      const summary = formatAuditSummary(audit);
-      refs.dataTypes.textContent = summary || "No stored data detected";
+      const summaryLines = formatAuditSummary(audit);
+      if (summaryLines) {
+        setConsoleLines(refs.dataTypes, summaryLines);
+      } else {
+        setConsoleLines(refs.dataTypes, ["No stored data detected"]);
+      }
       auditState.applied = true;
     }
 
@@ -161,6 +207,18 @@ export function createOverlay() {
     const flag = await loadSwReregFlag(origin);
     if (!flag) return;
     swAlertEl.classList.remove("hidden");
+
+    const swAlertText = swAlertEl.querySelector(".sw-alert-text");
+    if (flag.count <= 1) {
+      swAlertText.textContent = "\u26A0 SW re-registered after last nuke";
+      swAlertText.style.color = "";
+    } else if (flag.count < SW_REREG_ESCALATE_AT) {
+      swAlertText.textContent = `\u26A0 SW re-registered ${flag.count}\u00D7 this session`;
+      swAlertText.style.color = "";
+    } else {
+      swAlertText.textContent = `\u26A0 SW re-registered ${flag.count}\u00D7 \u2014 page script reinstalls on every load`;
+      swAlertText.style.color = "var(--escalated-color, #dc2626)";
+    }
 
     unregisterBtn.addEventListener("click", async () => {
       unregisterBtn.disabled = true;
@@ -354,267 +412,102 @@ function setupStateController(refs, origin, auditState) {
 function buildTemplate() {
   return `
 <style>
-:host {
-  all: initial !important;
-  display: block !important;
-}
-*, *::before, *::after {
-  box-sizing: border-box;
-}
+:host { all: initial !important; display: block !important; }
+*, *::before, *::after { box-sizing: border-box; }
 .overlay {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  pointer-events: auto;
-  opacity: 0;
-  transform: translateY(-8px);
-  transition: opacity 150ms ease, transform 150ms ease;
+  position: fixed; top: 16px; right: 16px; pointer-events: auto;
+  opacity: 0; transform: translateY(-8px) scale(0.98);
+  transition: opacity 200ms cubic-bezier(0.16, 1, 0.3, 1), transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
 }
-.overlay.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
+.overlay.visible { opacity: 1; transform: translateY(0) scale(1); }
 .panel {
-  width: 280px;
-  background: #ffffff;
-  border: 1px solid #e4e4e7;
-  border-radius: 10px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.08);
-  color: #0a0a0a;
-  user-select: none;
+  width: 320px; background: #ffffff; border: 1px solid #e4e4e7; border-radius: 12px;
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 14px;
+  box-shadow: 0 10px 15px -3px rgba(0,0,0,0.06), 0 4px 6px -4px rgba(0,0,0,0.05);
+  color: #0a0a0a; user-select: none;
 }
-.header-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.title {
-  font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
-  font-size: 13px;
-  font-weight: 600;
-  color: #0a0a0a;
-}
-.close-btn {
-  font-size: 18px;
-  color: #71717a;
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  line-height: 1;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-}
-.close-btn:hover {
-  color: #0a0a0a;
-}
-.origin {
-  font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
-  font-size: 11px;
-  color: #71717a;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-top: -4px;
-}
-.origin.invalid {
-  color: #dc2626;
-}
-hr {
-  border: none;
-  border-top: 1px solid #e4e4e7;
-  margin: 0;
-}
-.toggle-group {
-  display: flex;
-  background: #f4f4f5;
-  border-radius: 6px;
-  padding: 2px;
-  gap: 2px;
-}
+.header-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: -10px; }
+.title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+.close-btn { font-size: 18px; color: #a1a1aa; background: none; border: none; cursor: pointer; padding: 0; line-height: 1; transition: color 100ms; }
+.close-btn:hover { color: #0a0a0a; }
+.origin { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 11.5px; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.origin.invalid { color: #dc2626; }
+hr { border: none; border-top: 1px solid #e4e4e7; margin: 0; }
+.section { display: flex; flex-direction: column; gap: 8px; }
+.toggle-group { display: flex; background: #f4f4f5; border-radius: 8px; padding: 3px; gap: 2px; }
 .toggle-btn {
-  flex: 1;
-  padding: 6px 0;
-  font-size: 11px;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 400;
-  color: #71717a;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  cursor: pointer;
+  flex: 1; padding: 6px 0; font-size: 11px; font-weight: 500;
+  color: #71717a; background: none; border: 1px solid transparent; border-radius: 6px; cursor: pointer;
+  box-shadow: none; transition: all 150ms ease;
 }
-.toggle-btn.active {
-  background: #ffffff;
-  border-color: #e4e4e7;
-  font-weight: 600;
-  color: #0a0a0a;
+.toggle-btn.active { background: #ffffff; border-color: rgba(0,0,0,0.08); color: #0a0a0a; box-shadow: 0 1px 2px rgba(0,0,0,0.06); font-weight: 600; }
+.data-box {
+  background: #fafafa; border: 1px solid #e4e4e7; border-radius: 8px;
+  padding: 8px 10px; height: 100px; display: flex; align-items: flex-start;
+  overflow-y: auto; overflow-wrap: anywhere;
 }
-.data-types {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  font-size: 10px;
-  color: #71717a;
-  line-height: 1.4;
-}
-.data-types.regrowth { color: #dc2626; }
-.data-types.clean    { color: #16a34a; }
-.warning {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  font-size: 10px;
-  color: #dc2626;
-  line-height: 1.4;
-}
+.data-box::-webkit-scrollbar { width: 6px; }
+.data-box::-webkit-scrollbar-track { background: transparent; }
+.data-box::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 3px; }
+.data-types { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 10px; color: #52525b; line-height: 1.5; margin: 0; width: 100%; display: flex; flex-direction: column; }
+.data-types.regrowth { color: #dc2626; font-weight: 600; }
+.data-types.clean { color: #16a34a; font-weight: 600; }
+.warning { font-size: 10.5px; color: #dc2626; line-height: 1.4; font-weight: 500; }
 .sw-alert {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: flex; align-items: center; justify-content: space-between;
+  background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px; padding: 8px 10px; gap: 10px;
 }
 .sw-alert.hidden { display: none; }
-.sw-alert-text {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  font-size: 10px;
-  color: #b45309;
-  line-height: 1.4;
-}
+.sw-alert-text { font-size: 10px; color: #b45309; line-height: 1.3; flex: 1; font-weight: 500; margin: 0; }
 .unregister-btn {
-  width: 100%;
-  height: 30px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 500;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  cursor: pointer;
-  background: #fef3c7;
-  border: 1px solid #fcd34d;
-  color: #92400e;
-  transition: opacity 100ms ease;
+  flex-shrink: 0; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 10px; font-weight: 600;
+  cursor: pointer; background: #fbbf24; border: 1px solid #f59e0b; color: #78350f;
+  transition: background 150ms;
 }
-.unregister-btn:hover:not(:disabled) { opacity: 0.85; }
-.unregister-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-.hidden {
-  display: none;
-}
+.unregister-btn:hover:not(:disabled) { background: #f59e0b; }
+.unregister-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.hidden { display: none; }
+.action-box { display: flex; flex-direction: column; gap: 6px; }
 .action-btn {
-  width: 100%;
-  height: 36px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  cursor: pointer;
-  border: 1px solid transparent;
-  transition: opacity 100ms ease;
+  width: 100%; height: 38px; border-radius: 8px; font-size: 13px; font-weight: 600;
+  cursor: pointer; border: 1px solid transparent; transition: all 150ms ease;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
 }
-.action-btn.idle {
-  background: #3730a3;
-  color: #fafafa;
-}
-.action-btn.idle:hover:not(:disabled) {
-  opacity: 0.9;
-}
-.action-btn.armed {
-  background: #dc2626;
-  color: #ffffff;
-  border-color: rgba(220,38,38,0.4);
-}
-.action-btn.armed:hover:not(:disabled) {
-  opacity: 0.9;
-}
-.action-btn.firing {
-  background: #f4f4f5;
-  color: #71717a;
-  cursor: not-allowed;
-}
-.action-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.status {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  font-size: 11px;
-  line-height: 1.4;
-  opacity: 0;
-  transition: opacity 150ms ease;
-}
-.status.success {
-  opacity: 1;
-  color: #0a0a0a;
-}
-.status.error {
-  opacity: 1;
-  color: #dc2626;
-}
+.action-btn.idle { background: #18181b; color: #fafafa; }
+.action-btn.idle:hover:not(:disabled) { background: #27272a; }
+.action-btn.armed { background: #ef4444; color: #ffffff; border-color: #dc2626; }
+.action-btn.armed:hover:not(:disabled) { background: #dc2626; }
+.action-btn.firing { background: #f4f4f5; color: #a1a1aa; box-shadow: none; border-color: #e4e4e7;}
+.action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.status { font-size: 11px; line-height: 1.4; opacity: 0; transition: opacity 200ms; text-align: center; }
+.status.success { opacity: 1; color: #16a34a; font-weight: 500; }
+.status.error { opacity: 1; color: #dc2626; font-weight: 500; }
 
 @media (prefers-color-scheme: dark) {
-  .panel {
-    background: #171717;
-    border-color: #27272a;
-    color: #fafafa;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.32), 0 1px 2px rgba(0,0,0,0.24);
-  }
-  .title {
-    color: #fafafa;
-  }
-  .close-btn {
-    color: #a1a1aa;
-  }
-  .close-btn:hover {
-    color: #fafafa;
-  }
-  .origin {
-    color: #a1a1aa;
-  }
-  .origin.invalid {
-    color: #f87171;
-  }
-  hr {
-    border-top-color: #27272a;
-  }
-  .toggle-group {
-    background: #171717;
-  }
-  .toggle-btn {
-    color: #a1a1aa;
-  }
-  .toggle-btn.active {
-    background: #262626;
-    border-color: #27272a;
-    color: #fafafa;
-  }
-  .data-types {
-    color: #a1a1aa;
-  }
+  .panel { background: #09090b; border-color: #27272a; color: #fafafa; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5); }
+  .title { color: #fafafa; }
+  .close-btn { color: #71717a; } .close-btn:hover { color: #fafafa; }
+  .origin { color: #a1a1aa; }
+  hr { border-top-color: #27272a; }
+  .toggle-group { background: #18181b; }
+  .toggle-btn { color: #a1a1aa; }
+  .toggle-btn.active { background: #27272a; border-color: rgba(255,255,255,0.05); color: #fafafa; }
+  .data-box { background: #18181b; border-color: #27272a; }
+  .data-box::-webkit-scrollbar-thumb { background: #3f3f46; }
+  .data-types { color: #a1a1aa; }
+  .data-types.clean { color: #4ade80; }
   .data-types.regrowth { color: #f87171; }
-  .data-types.clean    { color: #4ade80; }
-  .warning {
-    color: #f87171;
-  }
-  .sw-alert-text  { color: #fbbf24; }
-  .unregister-btn { background: #292524; border-color: #78350f; color: #fcd34d; }
-  .action-btn.idle {
-    background: #e4e4e7;
-    color: #171717;
-  }
-  .action-btn.armed {
-    background: #f87171;
-    color: #ffffff;
-    border-color: rgba(248,113,113,0.4);
-  }
-  .action-btn.firing {
-    background: #262626;
-    color: #a1a1aa;
-  }
-  .status.success {
-    color: #fafafa;
-  }
-  .status.error {
-    color: #f87171;
-  }
+  .sw-alert { background: #451a03; border-color: #78350f; }
+  .sw-alert-text { color: #fcd34d; }
+  .unregister-btn { background: #78350f; border-color: #92400e; color: #fde68a; }
+  .unregister-btn:hover:not(:disabled) { background: #92400e; }
+  .action-btn.idle { background: #fafafa; color: #09090b; border-color: #fafafa; }
+  .action-btn.idle:hover:not(:disabled) { background: #e4e4e7; border-color: #e4e4e7; }
+  .action-btn.armed { background: #dc2626; border-color: #b91c1c; }
+  .action-btn.firing { background: #27272a; border-color: #3f3f46; color: #71717a; }
+  .status.success { color: #4ade80; }
+  .status.error { color: #f87171; }
 }
 </style>
 <div class="overlay" id="overlay">
@@ -625,19 +518,25 @@ hr {
     </div>
     <span class="origin" id="origin-text"></span>
     <hr/>
-    <div class="toggle-group">
-      <button class="toggle-btn active" id="btn-smart">Smart Clear</button>
-      <button class="toggle-btn" id="btn-full">Full Nuke</button>
+    <div class="section">
+      <div class="toggle-group">
+        <button class="toggle-btn active" id="btn-smart">Smart Clear</button>
+        <button class="toggle-btn" id="btn-full">Full Nuke</button>
+      </div>
+      <div class="data-box">
+        <span class="data-types" id="data-types"></span>
+      </div>
+      <span class="warning hidden" id="warning"></span>
     </div>
-    <span class="data-types" id="data-types"></span>
-    <span class="warning hidden" id="warning"></span>
     <div class="sw-alert hidden" id="sw-alert">
-      <span class="sw-alert-text">\u26A0 SW re-registered after last nuke</span>
-      <button class="unregister-btn" id="unregister-btn">Unregister SW only</button>
+      <span class="sw-alert-text"></span> <!-- JS assigns text reliably later -->
+      <button class="unregister-btn" id="unregister-btn">Unregister</button>
     </div>
     <hr/>
-    <button class="action-btn idle" id="action-btn">Clear Origin Data</button>
-    <span class="status" id="status"></span>
+    <div class="action-box">
+      <button class="action-btn idle" id="action-btn">Clear Origin Data</button>
+      <span class="status" id="status"></span>
+    </div>
   </div>
 </div>`;
 }

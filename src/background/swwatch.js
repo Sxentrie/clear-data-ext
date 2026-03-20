@@ -10,6 +10,7 @@ import {
   SW_BADGE_CLEAR_MS,
   BADGE_SW_REREGISTERED_TEXT,
   BADGE_SW_REREGISTERED_COLOR,
+  SW_REREG_EXPIRY_MS,
 } from "../shared/constants.js";
 import { setBadge } from "./badge.js";
 
@@ -56,8 +57,25 @@ export function watchForSwReregistration(tabId, origin) {
 
       if (swCount > 0) {
         const flagKey = SW_REREG_KEY_PREFIX + encodeURIComponent(origin);
-        // Persist flag — non-fatal if it fails
-        chrome.storage.session.set({ [flagKey]: { origin, ts: Date.now() } }).catch(() => {});
+        
+        // Read-modify-write: append this detection timestamp to the events array.
+        let events = [];
+        try {
+          const existing = await chrome.storage.session.get(flagKey);
+          const stored = existing[flagKey];
+          const cutoff = Date.now() - SW_REREG_EXPIRY_MS;
+          
+          if (Array.isArray(stored?.events)) {
+            events = stored.events.filter((ts) => ts > cutoff);
+          } else if (typeof stored?.ts === "number" && stored.ts > cutoff) {
+            events = [stored.ts]; // Migrate legacy storage structs dynamically
+          }
+        } catch { /* Non-fatal */ }
+
+        events.push(Date.now());
+        chrome.storage.session
+          .set({ [flagKey]: { origin, events } })
+          .catch(() => {});
 
         await setBadge(tabId, BADGE_SW_REREGISTERED_TEXT, BADGE_SW_REREGISTERED_COLOR);
         // Auto-clear after display window; pass no text to reset.

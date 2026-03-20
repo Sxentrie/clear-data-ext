@@ -6,8 +6,15 @@
 
 import { VALID_SCHEMES, MAX_ORIGIN_LENGTH } from "../shared/constants.js";
 
+export const MAX_NAME_LEN = 28;
+
+export function truncateName(n) {
+  return n.length > MAX_NAME_LEN ? n.slice(0, MAX_NAME_LEN) + "\u2026" : n;
+}
+
 /**
- * Returns true iff `value` is a structurally valid http/https origin string.
+ * Strict parity validation for exactly targeted origins.
+ * Guaranteed to return true only for properly formed Scheme + Host origins.
  * @param {unknown} value
  * @returns {boolean}
  */
