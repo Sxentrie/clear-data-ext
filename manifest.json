@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Page Util — Origin Nuke",
+  "version": "1.2.0",
+  "description": "Surgically obliterate all browsing data for the current tab's origin. No collateral damage.",
+
+  "minimum_chrome_version": "74",
+
+  "permissions": [
+    "browsingData",
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+
+  "action": {
+    "default_icon": {
+      "16":  "icons/icon16.png",
+      "32":  "icons/icon32.png",
+      "48":  "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "background": {
+    "service_worker": "src/background/index.js",
+    "type": "module"
+  },
+
+  "icons": {
+    "16":  "icons/icon16.png",
+    "32":  "icons/icon32.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "web_accessible_resources": [{
+    "resources": [
+      "src/shared/constants.js",
+      "src/shared/validation.js",
+      "src/content/main.js",
+      "src/content/overlay.js",
+      "src/content/errors.js",
+      "src/content/audit.js"
+    ],
+    "matches": ["<all_urls>"]
+  }]
+}
